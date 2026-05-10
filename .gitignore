@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+*pt
+*pth
+
+/blip_captions/train/blip2_captions_train.csv
+/blip_captions/gallery/blip2_captions_gallery.csv

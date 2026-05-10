@@ -1,0 +1,1 @@
+{"repos": [{"repoId": "timm/vit_large_patch14_clip_224.openai", "repoType": "model", "commitHash": "18d0535469bb561bf468d76c1d73aa35156c922b", "filePaths": ["open_clip_model.safetensors"]}]}
