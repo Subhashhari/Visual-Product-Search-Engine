@@ -1,11 +1,15 @@
 pdf_text.txt
 VR-Final-Project.pdf
+archive/*
+*.csv
+*.pt 
+*.jpg
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class
-
+scripts/*
 # C extensions
 *.so
 
