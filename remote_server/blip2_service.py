@@ -6,17 +6,16 @@ import os
 from typing import Any
 
 import torch
-import torch.nn.functional as F
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from PIL import Image, ImageOps
 
 
-MODEL_NAME = os.getenv("BLIP2_MODEL_NAME", "blip2_image_text_matching")
-MODEL_TYPE = os.getenv("BLIP2_MODEL_TYPE", "pretrain")
+MODEL_ID = os.getenv("BLIP2_MODEL_ID", "Salesforce/blip2-opt-2.7b")
 CLIP_WEIGHT = float(os.getenv("CLIP_WEIGHT", "0.7"))
+BATCH_SIZE = int(os.getenv("BLIP2_BATCH_SIZE", "4"))
 
 app = FastAPI(title="BLIP-2 Re-ranking Service")
-_model_bundle: tuple[Any, Any, Any, str] | None = None
+_model_bundle: tuple[Any, Any, torch.device, torch.dtype] | None = None
 
 
 def load_model():
@@ -24,16 +23,21 @@ def load_model():
     if _model_bundle is not None:
         return _model_bundle
 
-    from lavis.models import load_model_and_preprocess
+    from transformers import Blip2ForConditionalGeneration, Blip2Processor
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, vis_processors, txt_processors = load_model_and_preprocess(
-        name=MODEL_NAME,
-        model_type=MODEL_TYPE,
-        is_eval=True,
-        device=device,
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+
+    processor = Blip2Processor.from_pretrained(MODEL_ID)
+    model = Blip2ForConditionalGeneration.from_pretrained(
+        MODEL_ID,
+        torch_dtype=dtype,
+        low_cpu_mem_usage=True,
     )
-    _model_bundle = model, vis_processors, txt_processors, device
+    model.to(device)
+    model.eval()
+
+    _model_bundle = processor, model, device, dtype
     return _model_bundle
 
 
@@ -41,19 +45,53 @@ def read_image(raw: bytes) -> Image.Image:
     return ImageOps.exif_transpose(Image.open(io.BytesIO(raw))).convert("RGB")
 
 
+def batched(items: list[str], size: int) -> list[list[str]]:
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
 def score_candidates(image: Image.Image, captions: list[str]) -> list[float]:
-    model, vis_processors, txt_processors, device = load_model()
+    processor, model, device, dtype = load_model()
     if not captions:
         return []
 
-    image_tensor = vis_processors["eval"](image).unsqueeze(0).to(device)
-    image_batch = image_tensor.repeat(len(captions), 1, 1, 1)
-    text_batch = [txt_processors["eval"](caption or "clothing product") for caption in captions]
+    scores: list[float] = []
+    for caption_batch in batched(captions, max(1, BATCH_SIZE)):
+        clean_captions = [caption.strip() or "clothing product" for caption in caption_batch]
+        images = [image] * len(clean_captions)
+        inputs = processor(
+            images=images,
+            text=clean_captions,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+        )
 
-    with torch.no_grad():
-        output = model({"image": image_batch, "text_input": text_batch}, match_head="itm")
-        probabilities = F.softmax(output, dim=1)[:, 1]
-    return probabilities.detach().float().cpu().tolist()
+        inputs = {
+            key: value.to(device, dtype=dtype) if value.is_floating_point() else value.to(device)
+            for key, value in inputs.items()
+        }
+        labels = inputs["input_ids"].clone()
+        pad_token_id = processor.tokenizer.pad_token_id
+        if pad_token_id is not None:
+            labels[labels == pad_token_id] = -100
+
+        with torch.no_grad():
+            outputs = model(**inputs, labels=labels)
+            logits = outputs.logits[:, :-1, :].float()
+            target = labels[:, 1:]
+            valid = target.ne(-100)
+            safe_target = target.masked_fill(~valid, 0)
+            token_loss = torch.nn.functional.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                safe_target.reshape(-1),
+                reduction="none",
+            ).reshape(target.shape)
+            sequence_loss = (token_loss * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
+
+        # Lower caption loss means a better image-text match. Convert to a bounded score.
+        scores.extend(torch.exp(-sequence_loss).detach().cpu().tolist())
+
+    return [float(score) for score in scores]
 
 
 @app.get("/health")
@@ -61,9 +99,26 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "cuda": torch.cuda.is_available(),
-        "model_name": MODEL_NAME,
-        "model_type": MODEL_TYPE,
+        "model_id": MODEL_ID,
+        "batch_size": BATCH_SIZE,
+        "backend": "transformers",
     }
+
+
+@app.get("/")
+def root() -> dict[str, Any]:
+    return {
+        "service": "BLIP-2 re-ranking service",
+        "backend": "transformers",
+        "health": "/health",
+        "rerank": "/rerank",
+    }
+
+
+@app.post("/warmup")
+def warmup() -> dict[str, Any]:
+    load_model()
+    return {"ok": True, "model_id": MODEL_ID}
 
 
 @app.post("/rerank")
@@ -72,7 +127,19 @@ async def rerank(
     candidates: str = Form(...),
 ) -> dict[str, Any]:
     query_image = read_image(await image.read())
-    rows = json.loads(candidates)
+    try:
+        rows = json.loads(candidates)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Field 'candidates' must be a JSON list.",
+        ) from exc
+
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=400, detail="Field 'candidates' must be a JSON list.")
+    if not rows:
+        return {"results": []}
+
     captions = [str(row.get("caption") or "") for row in rows]
     blip_scores = score_candidates(query_image, captions)
 

@@ -3,5 +3,7 @@ uvicorn[standard]
 python-multipart
 torch
 pillow
-salesforce-lavis
 pyngrok
+transformers>=4.41
+accelerate
+sentencepiece

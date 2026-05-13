@@ -3,7 +3,5 @@ requests
 pillow
 pandas
 numpy
-torch
 open-clip-torch
-ultralytics
 pinecone

@@ -122,6 +122,9 @@ def load_yolo(model_path: str):
 
 
 def crop_with_yolo(image: Image.Image, model_path: str) -> tuple[Image.Image, str]:
+    if not model_path:
+        return center_crop(image), "YOLO disabled. Using center crop; enable manual crop if needed."
+
     model = load_yolo(model_path)
     if isinstance(model, Exception):
         return center_crop(image), f"YOLO unavailable ({model}). Using center crop."

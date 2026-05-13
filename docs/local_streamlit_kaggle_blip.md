@@ -38,6 +38,17 @@ cd Visual-Product-Search-Engine
 pip install -r requirements-blip2-server.txt
 ```
 
+Do not install or downgrade LAVIS/old Transformers for the demo server. The server uses HuggingFace Transformers BLIP-2, which works better with Kaggle Python 3.12.
+
+If you already tried the LAVIS fix and broke/downgraded Transformers, repair Kaggle with:
+
+```bash
+pip uninstall -y salesforce-lavis
+pip install -U "transformers>=4.41" accelerate sentencepiece
+```
+
+Then restart the Kaggle kernel before starting the server.
+
 If you have an ngrok auth token, set it:
 
 ```bash
@@ -48,6 +59,13 @@ Start the BLIP-2 API and ngrok tunnel:
 
 ```bash
 python remote_server/run_blip2_ngrok.py
+```
+
+Optional memory controls for Kaggle T4:
+
+```bash
+export BLIP2_MODEL_ID="Salesforce/blip2-opt-2.7b"
+export BLIP2_BATCH_SIZE=2
 ```
 
 Copy the printed URL:
@@ -84,8 +102,10 @@ CLIP_CHECKPOINT=/absolute/path/to/version_5/clip_best.pt
 Install local app dependencies:
 
 ```bash
-pip install -r requirements-streamlit.txt
+pip install -r requirements-streamlit-cpu.txt
 ```
+
+Use `requirements-streamlit-cpu.txt` on your laptop. It installs CPU-only PyTorch and avoids the huge CUDA downloads.
 
 Run the app:
 
@@ -107,3 +127,19 @@ http://localhost:8501
 4. The local app runs CLIP and Pinecone search.
 5. The local app sends only the cropped query image and candidate captions to the Kaggle BLIP-2 URL.
 6. Results are shown locally with CLIP, BLIP-2, and final scores.
+
+## YOLO weights note
+
+`YOLO_MODEL_PATH` can be left empty:
+
+```bash
+YOLO_MODEL_PATH=
+```
+
+In that mode the app uses a center crop first, and you can turn on manual crop in the UI. If you want automatic YOLO cropping, set:
+
+```bash
+YOLO_MODEL_PATH=yolov8n.pt
+```
+
+Ultralytics will download `yolov8n.pt` on first run if your local machine has internet access.

@@ -1,0 +1,12 @@
+--index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+
+--index-url https://pypi.org/simple
+streamlit
+requests
+pillow
+pandas
+numpy
+open-clip-torch
+pinecone
