@@ -13,6 +13,7 @@ from PIL import Image, ImageOps
 MODEL_ID = os.getenv("BLIP2_MODEL_ID", "Salesforce/blip2-opt-2.7b")
 CLIP_WEIGHT = float(os.getenv("CLIP_WEIGHT", "0.7"))
 BATCH_SIZE = int(os.getenv("BLIP2_BATCH_SIZE", "4"))
+BLIP2_SCORE_FLOOR = float(os.getenv("BLIP2_SCORE_FLOOR", "0.05"))
 
 app = FastAPI(title="BLIP-2 Re-ranking Service")
 _model_bundle: tuple[Any, Any, torch.device, torch.dtype] | None = None
@@ -99,9 +100,15 @@ def score_candidates(image: Image.Image, captions: list[str]) -> list[float]:
     if max_loss == min_loss:
         return [0.5 for _ in losses]
 
-    # Convert losses to relative 0..1 scores for this candidate set.
-    # Best caption gets 1.0, worst gets 0.0.
-    return [float((max_loss - loss) / (max_loss - min_loss)) for loss in losses]
+    # Convert losses to relative scores for this candidate set.
+    # Keep a small floor/ceiling so the demo does not show hard 0/1 endpoints
+    # just because an item is the worst/best within the current candidate batch.
+    score_floor = min(max(BLIP2_SCORE_FLOOR, 0.0), 0.49)
+    score_span = 1.0 - (2.0 * score_floor)
+    return [
+        float(score_floor + score_span * ((max_loss - loss) / (max_loss - min_loss)))
+        for loss in losses
+    ]
 
 
 @app.get("/health")

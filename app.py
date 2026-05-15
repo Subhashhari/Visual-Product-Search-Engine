@@ -18,6 +18,7 @@ APP_TITLE = "Visual Product Search Engine"
 DEFAULT_INDEX_NAME = "vr-clothing-gallery"
 DEFAULT_NAMESPACE = "finetuned-alpha-0.7"
 NGROK_HEADERS = {"ngrok-skip-browser-warning": "true"}
+BLIP2_SCORE_FLOOR = 0.05
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,9 @@ class Settings:
     clip_model: str
     clip_pretrained: str
     candidate_k: int
+    blip2_rerank_k: int
     timeout_seconds: int
+    health_timeout_seconds: int
 
 
 def env_int(name: str, default: int) -> int:
@@ -74,7 +77,9 @@ def load_settings() -> Settings:
         clip_model=os.getenv("CLIP_MODEL", "ViT-L-14"),
         clip_pretrained=os.getenv("CLIP_PRETRAINED", "openai"),
         candidate_k=env_int("CANDIDATE_K", 50),
+        blip2_rerank_k=env_int("BLIP2_RERANK_K", 10),
         timeout_seconds=env_int("BLIP2_TIMEOUT_SECONDS", 120),
+        health_timeout_seconds=env_int("BLIP2_HEALTH_TIMEOUT_SECONDS", 180),
     )
 
 
@@ -164,8 +169,14 @@ def load_clip(model_name: str, pretrained: str, checkpoint_path: str):
     )
     if checkpoint_path and Path(checkpoint_path).exists():
         state = torch.load(checkpoint_path, map_location=device)
-        if isinstance(state, dict) and "model_state_dict" in state:
-            state = state["model_state_dict"]
+        if isinstance(state, dict):
+            state = (
+                state.get("model_state_dict")
+                or state.get("model_state")
+                or state.get("state_dict")
+                or state
+            )
+            state = {key.replace("module.", ""): value for key, value in state.items()}
         model.load_state_dict(state, strict=False)
     model.to(device).eval()
     return model, preprocess, device
@@ -249,6 +260,21 @@ def enrich_candidates(candidates: list[dict[str, Any]], settings: Settings) -> l
     return enriched
 
 
+def coerce_remote_score(remote: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        raw_score = remote.get(key)
+        if raw_score is None:
+            continue
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(score):
+            continue
+        return max(BLIP2_SCORE_FLOOR, score) if score <= 0 else score
+    return None
+
+
 def request_blip2_rerank(
     query_crop: Image.Image,
     candidates: list[dict[str, Any]],
@@ -257,6 +283,11 @@ def request_blip2_rerank(
     if not settings.blip2_server_url:
         return candidates, "BLIP2_SERVER_URL is not set. Showing CLIP/Pinecone ranking only."
 
+    rerank_count = max(0, min(settings.blip2_rerank_k, len(candidates)))
+    if rerank_count == 0:
+        return candidates, "BLIP2_RERANK_K is 0. Showing CLIP/Pinecone ranking only."
+
+    rerank_candidates = candidates[:rerank_count]
     payload_candidates = [
         {
             "id": row["id"],
@@ -264,7 +295,7 @@ def request_blip2_rerank(
             "clip_score": row.get("clip_score", 0.0),
             "metadata": row.get("metadata", {}),
         }
-        for row in candidates
+        for row in rerank_candidates
     ]
 
     files = {"image": ("query_crop.png", to_png_bytes(query_crop), "image/png")}
@@ -283,17 +314,31 @@ def request_blip2_rerank(
         return candidates, f"Remote BLIP-2 re-rank failed: {exc}. Showing CLIP/Pinecone ranking only."
 
     reranked = []
-    for candidate in candidates:
+    for candidate in rerank_candidates:
         remote = by_id.get(str(candidate["id"]), {})
+        clip_score = float(candidate.get("clip_score", 0.0))
+        blip2_score = coerce_remote_score(remote, ("blip2_score", "blip_score", "score"))
+        final_score = coerce_remote_score(remote, ("final_score",))
         reranked.append(
             {
                 **candidate,
-                "blip2_score": remote.get("blip2_score"),
-                "final_score": remote.get("final_score", candidate.get("clip_score", 0.0)),
+                "blip2_score": blip2_score,
+                "final_score": final_score if final_score is not None else clip_score,
             }
         )
-    reranked.sort(key=lambda row: row.get("final_score", row.get("clip_score", 0.0)), reverse=True)
-    return reranked, "Remote BLIP-2 image-text matching re-rank applied."
+    reranked.extend(
+        {
+            **candidate,
+            "final_score": candidate.get("clip_score", 0.0),
+        }
+        for candidate in candidates[rerank_count:]
+    )
+    reranked[:rerank_count] = sorted(
+        reranked[:rerank_count],
+        key=lambda row: row.get("final_score", row.get("clip_score", 0.0)),
+        reverse=True,
+    )
+    return reranked, f"Remote BLIP-2 image-text matching re-rank applied to top {rerank_count} candidates."
 
 
 def blip2_health(settings: Settings) -> tuple[bool, str]:
@@ -301,18 +346,18 @@ def blip2_health(settings: Settings) -> tuple[bool, str]:
         return False, "BLIP2_SERVER_URL is not set."
 
     try:
-        response = requests.get(
-            f"{settings.blip2_server_url}/health",
+        response = requests.post(
+            f"{settings.blip2_server_url}/warmup",
             headers=NGROK_HEADERS,
-            timeout=10,
+            timeout=settings.health_timeout_seconds,
         )
         response.raise_for_status()
         payload = response.json()
     except Exception as exc:  # noqa: BLE001 - surfaced in the sidebar.
         return False, str(exc)
 
-    cuda = "GPU" if payload.get("cuda") else "CPU"
-    return True, f"{payload.get('model_name', 'BLIP-2')} ready on {cuda}"
+    model_name = payload.get("model_id") or payload.get("model_name") or "BLIP-2"
+    return True, f"{model_name} warmed and ready."
 
 
 def local_image_path(image_name: str, image_root: str) -> Path | None:
