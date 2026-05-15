@@ -95,6 +95,9 @@ GALLERY_CSV=/absolute/path/to/version_5/gallery.csv
 CAPTIONS_CSV=/absolute/path/to/version_5/blip2_captions_gallery.csv
 IMAGE_ROOT=/absolute/path/to/version_5
 CLIP_CHECKPOINT=/absolute/path/to/version_5/clip_best.pt
+CANDIDATE_K=50
+BLIP2_RERANK_K=10
+BLIP2_TIMEOUT_SECONDS=180
 ```
 
 ## 4. Run Streamlit locally
@@ -128,6 +131,10 @@ http://localhost:8501
 5. The local app sends only the cropped query image and candidate captions to the Kaggle BLIP-2 URL.
 6. Results are shown locally with CLIP, BLIP-2, and final scores.
 
+The sidebar server check warms the BLIP-2 model on Kaggle. Run it once before the first search so the first re-rank request does not spend its timeout loading model weights.
+
+`CANDIDATE_K` controls how many Pinecone matches are fetched. `BLIP2_RERANK_K` controls how many of those matches are sent to Kaggle for the slower BLIP-2 pass. Keep `BLIP2_RERANK_K` at least as large as the number of results you plan to display, such as `10`, on a Kaggle T4. Results beyond `BLIP2_RERANK_K` remain CLIP-only fallback entries.
+
 ## YOLO weights note
 
 `YOLO_MODEL_PATH` can be left empty:
@@ -140,6 +147,12 @@ In that mode the app uses a center crop first, and you can turn on manual crop i
 
 ```bash
 YOLO_MODEL_PATH=yolov8n.pt
+```
+
+Then install the optional YOLO dependency locally:
+
+```bash
+pip install -r requirements-yolo.txt
 ```
 
 Ultralytics will download `yolov8n.pt` on first run if your local machine has internet access.
